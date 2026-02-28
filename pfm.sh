@@ -44,6 +44,31 @@ gb_to_bytes() { awk "BEGIN{printf \"%.0f\",$1*1000000000}"; }
 is_ipv6() { [[ "$1" == *:* ]]; }
 ipt() { is_ipv6 "$1" && echo "ip6tables" || echo "iptables"; }
 
+# FIX: Validate port number (1-65535, numeric only)
+validate_port() {
+    local p="$1"
+    [[ "$p" =~ ^[0-9]+$ ]] || { echo -e "  ${R}Invalid port: must be numeric${NC}"; return 1; }
+    (( p >= 1 && p <= 65535 )) || { echo -e "  ${R}Invalid port: must be 1-65535${NC}"; return 1; }
+    return 0
+}
+
+# FIX: Validate destination IP (basic IPv4/IPv6 sanity check)
+validate_ip() {
+    local ip="$1"
+    # Reject empty, path traversal, spaces, shell metacharacters
+    [[ -z "$ip" ]] && { echo -e "  ${R}Invalid IP: empty${NC}"; return 1; }
+    [[ "$ip" =~ [^0-9a-fA-F.:] ]] && { echo -e "  ${R}Invalid IP: illegal characters${NC}"; return 1; }
+    return 0
+}
+
+# FIX: JSON-escape a string (replace \ and " for safe embedding in JSON)
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    echo "$s"
+}
+
 # ═══════════════ REALM ═══════════════
 realm_installed() { [[ -x "$REALM_BIN" ]]; }
 install_realm() {
@@ -456,51 +481,55 @@ PORTS_DIR="$PFM_DIR/ports"
 USAGE_DIR="$PFM_DIR/usage"
 
 gb_to_bytes() { awk "BEGIN{printf \"%.0f\",$1*1000000000}"; }
+# FIX: Support IPv6 — use ip6tables when destination is IPv6
+ipt() { [[ "$1" == *:* ]] && echo "ip6tables" || echo "iptables"; }
 
 case "$1" in
     block)
         [[ ! -f "$PORTS_DIR/$2" ]] && { echo "Port not found" >&2; exit 1; }
         /usr/local/bin/pfm sync 2>/dev/null
         source "$PORTS_DIR/$2"
+        local cmd=$(ipt "$P_DEST")
         # Inline block logic
         sed -i "s/P_BLOCKED=0/P_BLOCKED=1/" "$PORTS_DIR/$2"
         case "$P_METHOD" in
             haproxy)
                 for p in tcp; do
-                    iptables -C INPUT -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null || \
-                    iptables -I INPUT 1 -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP
+                    $cmd -C INPUT -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null || \
+                    $cmd -I INPUT 1 -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP
                 done
                 /usr/local/bin/pfm restore 2>/dev/null ;;
             realm)
                 systemctl stop "pfm-realm-${2}" 2>/dev/null
                 for p in tcp udp; do
-                    iptables -C INPUT -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null || \
-                    iptables -I INPUT 1 -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP
+                    $cmd -C INPUT -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null || \
+                    $cmd -I INPUT 1 -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP
                 done ;;
             *)
                 for p in tcp udp; do
-                    iptables -C FORWARD -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null || \
-                    iptables -I FORWARD 1 -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP
+                    $cmd -C FORWARD -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null || \
+                    $cmd -I FORWARD 1 -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP
                 done ;;
         esac ;;
     unblock)
         [[ ! -f "$PORTS_DIR/$2" ]] && { echo "Port not found" >&2; exit 1; }
         source "$PORTS_DIR/$2"
+        local cmd=$(ipt "$P_DEST")
         sed -i "s/P_BLOCKED=1/P_BLOCKED=0/" "$PORTS_DIR/$2"
         case "$P_METHOD" in
             haproxy)
                 for p in tcp; do
-                    while iptables -D INPUT -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null; do :; done
+                    while $cmd -D INPUT -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null; do :; done
                 done
                 /usr/local/bin/pfm restore 2>/dev/null ;;
             realm)
                 for p in tcp udp; do
-                    while iptables -D INPUT -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null; do :; done
+                    while $cmd -D INPUT -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null; do :; done
                 done
                 systemctl start "pfm-realm-${2}" 2>/dev/null ;;
             *)
                 for p in tcp udp; do
-                    while iptables -D FORWARD -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null; do :; done
+                    while $cmd -D FORWARD -p "$p" --dport "$2" -m comment --comment "pfm_block_${2}" -j DROP 2>/dev/null; do :; done
                 done ;;
         esac ;;
     limit)
@@ -622,8 +651,29 @@ cmd_restore() {
         local port=$(basename "$f") P_DEST="" P_METHOD="iptables" P_BLOCKED=0; source "$f"
         case "$P_METHOD" in
             haproxy) apply_accounting_userspace "$port" "$P_DEST"; need_hp=1 ;;
-            realm)   apply_accounting_userspace "$port" "$P_DEST"; create_realm_service "$port" "$P_DEST"
-                     [[ "$P_BLOCKED" == "1" ]] && stop_realm_service "$port" ;;
+            realm)   apply_accounting_userspace "$port" "$P_DEST"
+                     # FIX: Only create+start realm service if NOT blocked (prevents brief traffic leak)
+                     if [[ "$P_BLOCKED" != "1" ]]; then
+                         create_realm_service "$port" "$P_DEST"
+                     else
+                         # Create config file only, do NOT start the service
+                         mkdir -p "$REALM_DIR"
+                         cat > "$(realm_conf "$port")" << EOF
+[network]
+no_tcp = false
+use_udp = true
+
+[[endpoints]]
+listen = "0.0.0.0:${port}"
+remote = "${P_DEST}:${port}"
+EOF
+                         # Re-apply block rules
+                         local cmd=$(ipt "$P_DEST") p
+                         for p in tcp udp; do
+                             $cmd -C INPUT -p "$p" --dport "$port" -m comment --comment "pfm_block_${port}" -j DROP 2>/dev/null || \
+                             $cmd -I INPUT 1 -p "$p" --dport "$port" -m comment --comment "pfm_block_${port}" -j DROP
+                         done
+                     fi ;;
             *)       apply_rules_iptables "$port" "$P_DEST"
                      [[ "$P_BLOCKED" == "1" ]] && block_port "$port" ;;
         esac
@@ -684,9 +734,11 @@ menu_add() {
     echo ""
     echo -ne "  ${C}Port:${NC} "; read -r port
     [[ -z "$port" ]] && return
+    validate_port "$port" || { sleep 1; return; }
     [[ -f "$PORTS_DIR/$port" ]] && { echo -e "  ${R}Port $port exists${NC}"; sleep 1; return; }
     echo -ne "  ${C}Destination IP:${NC} "; read -r dest
     [[ -z "$dest" ]] && return
+    validate_ip "$dest" || { sleep 1; return; }
     echo -ne "  ${C}Owner:${NC} "; read -r owner
     [[ -z "$owner" ]] && return
     if [[ ! -f "$USERS_DIR/$owner" ]]; then
@@ -788,6 +840,7 @@ menu_tunnel_detail() {
             1)  # Edit Destination IP
                 echo -ne "  ${C}New Destination IP [${P_DEST}]:${NC} "; read -r newdest
                 [[ -z "$newdest" ]] && continue
+                validate_ip "$newdest" || { sleep 1; continue; }
                 sync_port_usage "$port"
                 remove_rules "$port"
                 sed -i "s|P_DEST=\"$P_DEST\"|P_DEST=\"$newdest\"|" "$PORTS_DIR/$port"
@@ -801,6 +854,7 @@ menu_tunnel_detail() {
             2)  # Edit Port
                 echo -ne "  ${C}New Port [${port}]:${NC} "; read -r newport
                 [[ -z "$newport" ]] && continue
+                validate_port "$newport" || { sleep 1; continue; }
                 [[ -f "$PORTS_DIR/$newport" ]] && { echo -e "  ${R}Port $newport already exists${NC}"; sleep 1; continue; }
                 sync_port_usage "$port"
                 remove_rules "$port"
@@ -1066,14 +1120,16 @@ cmd_json() {
     local fu=1; for uf in "$USERS_DIR"/*; do [[ -f "$uf" ]] || continue
         local name=$(basename "$uf") ENABLED="" TG_ID=""; source "$uf"
         [[ $fu -eq 0 ]] && echo ","; fu=0
-        echo "{\"name\":\"$name\",\"tg_id\":\"$TG_ID\",\"enabled\":$ENABLED,\"ports\":["
+        local jname=$(json_escape "$name") jtg=$(json_escape "$TG_ID")
+        echo "{\"name\":\"$jname\",\"tg_id\":\"$jtg\",\"enabled\":$ENABLED,\"ports\":["
         local fp=1; for pf in "$PORTS_DIR"/*; do [[ -f "$pf" ]] || continue
             local P_USER="" P_DEST="" P_DPORT="" P_LIMIT=0 P_LIMIT_GB=0 P_BLOCKED=0 P_METHOD="iptables"; source "$pf"
             if [[ "$P_USER" == "$name" ]]; then
                 local lp=$(basename "$pf")
                 local u=$(cat "$USAGE_DIR/$lp" 2>/dev/null || echo 0)
+                local jdest=$(json_escape "${P_DEST}:${P_DPORT}") jmethod=$(json_escape "$P_METHOD")
                 [[ $fp -eq 0 ]] && echo ","; fp=0
-                echo "{\"port\":$lp,\"dest\":\"${P_DEST}:${P_DPORT}\",\"method\":\"$P_METHOD\",\"dl_bytes\":$u,\"dl_human\":\"$(human_bytes $u)\",\"limit_bytes\":$P_LIMIT,\"limit_gb\":$P_LIMIT_GB,\"blocked\":$P_BLOCKED}"
+                echo "{\"port\":$lp,\"dest\":\"${jdest}\",\"method\":\"${jmethod}\",\"dl_bytes\":$u,\"dl_human\":\"$(human_bytes $u)\",\"limit_bytes\":$P_LIMIT,\"limit_gb\":$P_LIMIT_GB,\"blocked\":$P_BLOCKED}"
             fi; done; echo -n "]}"; done; echo "]}"
 }
 

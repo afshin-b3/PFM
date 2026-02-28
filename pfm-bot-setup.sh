@@ -29,25 +29,69 @@ init_config() {
     fi
 }
 
+# FIX: py_get/py_set use heredoc so the CONFIG_FILE path is passed as argv[1],
+# not interpolated into Python source. User data is never in executable code.
 py_get() {
-    python3 -c "
-import json
-cfg = json.load(open('$CONFIG_FILE'))
-$1
-" 2>/dev/null
+    local script="$1"
+    python3 - "$CONFIG_FILE" 2>/dev/null <<PYEOF
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+$script
+PYEOF
 }
 
 py_set() {
-    python3 -c "
-import json
-with open('$CONFIG_FILE') as f: cfg = json.load(f)
-$1
-with open('$CONFIG_FILE','w') as f: json.dump(cfg, f, indent=2)
-" 2>/dev/null
+    local script="$1"
+    python3 - "$CONFIG_FILE" 2>/dev/null <<PYEOF
+import json, sys
+with open(sys.argv[1]) as f: cfg = json.load(f)
+$script
+with open(sys.argv[1],'w') as f: json.dump(cfg, f, indent=2)
+PYEOF
 }
 
-get_token() { py_get "print(cfg.get('bot_token',''))"; }
-get_admin() { py_get "print(cfg.get('admin_id',0))"; }
+# FIX: Safe token/admin setters pass values via env vars, never interpolated into code
+py_set_token() {
+    PFM_VAL="$1" python3 - "$CONFIG_FILE" 2>/dev/null << 'PYEOF'
+import json, sys, os
+with open(sys.argv[1]) as f: cfg = json.load(f)
+cfg["bot_token"] = os.environ["PFM_VAL"]
+with open(sys.argv[1],'w') as f: json.dump(cfg, f, indent=2)
+PYEOF
+}
+
+py_set_admin() {
+    PFM_VAL="$1" python3 - "$CONFIG_FILE" 2>/dev/null << 'PYEOF'
+import json, sys, os
+with open(sys.argv[1]) as f: cfg = json.load(f)
+cfg["admin_id"] = int(os.environ["PFM_VAL"])
+with open(sys.argv[1],'w') as f: json.dump(cfg, f, indent=2)
+PYEOF
+}
+
+# FIX: Server append passes all fields via env vars
+py_append_server() {
+    SRV_NAME="$1" SRV_HOST="$2" SRV_PORT="$3" SRV_USER="$4" \
+    SRV_PASSWORD="$5" SRV_KEY="$6" python3 - "$CONFIG_FILE" 2>/dev/null << 'PYEOF'
+import json, sys, os
+with open(sys.argv[1]) as f: cfg = json.load(f)
+srv = {
+    "name": os.environ.get("SRV_NAME",""),
+    "host": os.environ.get("SRV_HOST",""),
+    "port": int(os.environ.get("SRV_PORT","22")),
+    "user": os.environ.get("SRV_USER","root"),
+}
+pw = os.environ.get("SRV_PASSWORD","")
+key = os.environ.get("SRV_KEY","")
+if pw: srv["password"] = pw
+elif key: srv["key"] = key
+cfg.setdefault("servers",[]).append(srv)
+with open(sys.argv[1],'w') as f: json.dump(cfg, f, indent=2)
+PYEOF
+}
+
+get_token()        { py_get "print(cfg.get('bot_token',''))"; }
+get_admin()        { py_get "print(cfg.get('admin_id',0))"; }
 get_server_count() { py_get "print(len(cfg.get('servers',[])))"; }
 
 # ─── Bot service ───
@@ -107,7 +151,7 @@ menu_setup() {
     fi
     local bot_name=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['username'])" 2>/dev/null)
     echo -e "${G}OK!${NC} @${bot_name}"
-    py_set "cfg['bot_token']='$token'"
+    py_set_token "$token"   # FIX: safe setter via env var
 
     # Step 2: Admin ID
     echo ""
@@ -116,7 +160,9 @@ menu_setup() {
     echo -e "  ${GR}To find your ID: message @userinfobot on Telegram${NC}"
     echo -ne "  ${C}Admin Telegram ID:${NC} "; read -r adm
     [[ -z "$adm" ]] && return
-    py_set "cfg['admin_id']=int('$adm')"
+    # FIX: Validate admin ID is numeric before saving
+    [[ ! "$adm" =~ ^[0-9]+$ ]] && { echo -e "  ${R}Invalid ID: must be numeric${NC}"; sleep 2; return; }
+    py_set_admin "$adm"    # FIX: safe setter via env var
 
     # Step 3: Start bot
     echo ""
@@ -169,7 +215,8 @@ menu_add_server() {
     if [[ "$auth" == "2" ]]; then
         echo -ne "  ${C}SSH Key Path [/root/.ssh/id_rsa]:${NC} "; read -r key
         key="${key:-/root/.ssh/id_rsa}"
-        ssh_test_cmd="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i $key -p $port ${user}@${host}"
+        # FIX: key path quoted properly
+        ssh_test_cmd="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i \"$key\" -p $port ${user}@${host}"
     else
         echo -ne "  ${C}Root Password:${NC} "; read -rs password; echo ""
         if ! command -v sshpass > /dev/null 2>&1; then
@@ -177,7 +224,8 @@ menu_add_server() {
             apt-get install -y -qq sshpass > /dev/null 2>&1
             command -v sshpass > /dev/null 2>&1 && echo -e "${G}OK${NC}" || { echo -e "${R}Failed${NC}"; sleep 1; return; }
         fi
-        ssh_test_cmd="sshpass -p $password ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -p $port ${user}@${host}"
+        # FIX: Password passed via sshpass -e (environment) to avoid shell word-splitting on special chars
+        ssh_test_cmd="SSHPASS=$(printf '%q' "$password") sshpass -e ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -p $port ${user}@${host}"
     fi
 
     echo -ne "\n  ${GR}Testing connection...${NC} "
@@ -203,10 +251,11 @@ menu_add_server() {
         echo -e "${Y}Not working${NC}"
     fi
 
+    # FIX: Use py_append_server to safely pass values via env vars (no shell injection)
     if [[ -n "$password" ]]; then
-        py_set "cfg['servers'].append({'name':'$name','host':'$host','port':$port,'user':'$user','password':'$password'})"
+        py_append_server "$name" "$host" "$port" "$user" "$password" ""
     else
-        py_set "cfg['servers'].append({'name':'$name','host':'$host','port':$port,'user':'$user','key':'$key'})"
+        py_append_server "$name" "$host" "$port" "$user" "" "$key"
     fi
 
     echo -e "\n  ${G}Server '${name}' added!${NC}"

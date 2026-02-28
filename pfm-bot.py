@@ -162,7 +162,8 @@ def find_user_across_servers(tg_id):
     return results
 
 # ─── Pending Actions ───
-pending = {}  # chat_id -> {"action": ..., "server_idx": ..., "port": ..., "msg_id": ...}
+PENDING_TTL = 300  # 5 minutes expiry for pending actions
+pending = {}  # chat_id -> {"action": ..., "server_idx": ..., "port": ..., "msg_id": ..., "ts": ...}
 
 # ─── User View ───
 def show_user_status(chat_id, msg_id, tg_id):
@@ -409,10 +410,9 @@ def admin_action(chat_id, msg_id, srv_idx, port, action):
 
         if blocked:
             ok, msg = ssh_pfm_cmd(srv, f"unblock {port}")
-            answer_cb("", "🟢 Unblocked" if ok else f"❌ {msg}")
+            # FIX: answer_cb already called in handle_callback; don't call again with empty cb_id
         else:
             ok, msg = ssh_pfm_cmd(srv, f"block {port}")
-            answer_cb("", "🔴 Blocked" if ok else f"❌ {msg}")
         time.sleep(0.3)
         admin_port_detail(chat_id, msg_id, srv_idx, port)
 
@@ -421,7 +421,7 @@ def admin_action(chat_id, msg_id, srv_idx, port, action):
         admin_port_detail(chat_id, msg_id, srv_idx, port)
 
     elif action == "limit":
-        pending[chat_id] = {"action": "limit", "server_idx": idx, "port": port, "msg_id": msg_id}
+        pending[chat_id] = {"action": "limit", "server_idx": idx, "port": port, "msg_id": msg_id, "ts": time.time()}
         edit(chat_id, msg_id,
              f"📝 <b>Set Limit</b> — {name} Port {port}\n\n"
              f"Enter limit in GB:\n"
@@ -429,7 +429,7 @@ def admin_action(chat_id, msg_id, srv_idx, port, action):
              [[btn("❌ Cancel", f"sp_{idx}_{port}")]])
 
     elif action == "add":
-        pending[chat_id] = {"action": "add", "server_idx": idx, "port": port, "msg_id": msg_id}
+        pending[chat_id] = {"action": "add", "server_idx": idx, "port": port, "msg_id": msg_id, "ts": time.time()}
         edit(chat_id, msg_id,
              f"➕ <b>Add Traffic</b> — {name} Port {port}\n\n"
              f"Enter GB to add to limit:\n"
@@ -437,7 +437,7 @@ def admin_action(chat_id, msg_id, srv_idx, port, action):
              [[btn("❌ Cancel", f"sp_{idx}_{port}")]])
 
     elif action == "sub":
-        pending[chat_id] = {"action": "sub", "server_idx": idx, "port": port, "msg_id": msg_id}
+        pending[chat_id] = {"action": "sub", "server_idx": idx, "port": port, "msg_id": msg_id, "ts": time.time()}
         edit(chat_id, msg_id,
              f"➖ <b>Subtract Traffic</b> — {name} Port {port}\n\n"
              f"Enter GB to subtract from limit:\n"
@@ -450,6 +450,12 @@ def handle_text(chat_id, tg_id, text):
         return False
 
     p = pending[chat_id]
+    # FIX: Expire pending actions older than PENDING_TTL seconds
+    if time.time() - p.get("ts", 0) > PENDING_TTL:
+        del pending[chat_id]
+        send(chat_id, "⏰ Action expired. Please try again.")
+        return True
+
     del pending[chat_id]
     act = p["action"]
     idx = p["server_idx"]
@@ -513,6 +519,7 @@ def handle_callback(cb):
     if not is_admin(tg_id):
         if data == "user_refresh":
             show_user_status(chat_id, msg_id, tg_id)
+        # FIX: Silently ignore unknown callbacks from non-admins (no info leak)
         return
 
     # ─── Admin callbacks ───
@@ -561,7 +568,7 @@ def handle_callback(cb):
                        "user": "👤 User", "password": "🔐 Password"}
             label = labels.get(field, field)
             pending[chat_id] = {"action": "edit_server", "server_idx": idx,
-                               "field": field, "msg_id": msg_id}
+                               "field": field, "msg_id": msg_id, "ts": time.time()}
             hint = f"\nCurrent: <code>{cur}</code>" if field != "password" else ""
             edit(chat_id, msg_id,
                  f"✏️ <b>Edit {label}</b> — {name}{hint}\n\n"
