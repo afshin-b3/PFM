@@ -42,7 +42,7 @@ PFM یک ابزار مدیریت پورت فوروارد با قابلیت ما�
 <div dir="ltr" align="left">
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/SadraHimself/PFM/main/pfm.sh) install
+bash <(curl -s https://raw.githubusercontent.com/afshin-b3/PFM/main/pfm.sh) install
 ```
 
 </div>
@@ -52,7 +52,7 @@ bash <(curl -s https://raw.githubusercontent.com/SadraHimself/PFM/main/pfm.sh) i
 <div dir="ltr" align="left">
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/SadraHimself/PFM/main/pfm-bot-setup.sh)
+bash <(curl -s https://raw.githubusercontent.com/afshin-b3/PFM/main/pfm-bot-setup.sh)
 ```
 
 </div>
@@ -83,13 +83,13 @@ bash <(curl -s https://raw.githubusercontent.com/SadraHimself/PFM/main/pfm-bot-s
 ## 🚀 Quick Install
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/SadraHimself/PFM/main/pfm.sh) install
+bash <(curl -s https://raw.githubusercontent.com/afshin-b3/PFM/main/pfm.sh) install
 ```
 
 ## 📦 Manual Install
 
 ```bash
-curl -o /usr/local/bin/pfm https://raw.githubusercontent.com/SadraHimself/PFM/main/pfm.sh
+curl -o /usr/local/bin/pfm https://raw.githubusercontent.com/afshin-b3/PFM/main/pfm.sh
 chmod +x /usr/local/bin/pfm
 pfm install
 ```
@@ -99,7 +99,7 @@ pfm install
 The bot allows you to manage all your PFM servers remotely from Telegram.
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/SadraHimself/PFM/main/pfm-bot-setup.sh)
+bash <(curl -s https://raw.githubusercontent.com/afshin-b3/PFM/main/pfm-bot-setup.sh)
 ```
 
 **Bot Features:**
